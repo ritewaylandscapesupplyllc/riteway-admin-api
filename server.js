@@ -9,12 +9,20 @@ const {
   FB_CLIENT_EMAIL,
   FB_PRIVATE_KEY,
   FB_DATABASE_URL,
-  ADMIN_API_KEY
+  ADMIN_API_KEY,
 } = process.env;
 
-if (!FB_PROJECT_ID || !FB_CLIENT_EMAIL || !FB_PRIVATE_KEY || !FB_DATABASE_URL || !ADMIN_API_KEY) {
+if (
+  !FB_PROJECT_ID ||
+  !FB_CLIENT_EMAIL ||
+  !FB_PRIVATE_KEY ||
+  !FB_DATABASE_URL ||
+  !ADMIN_API_KEY
+) {
   console.error('Missing one or more required environment variables.');
-  console.error('Required: FB_PROJECT_ID, FB_CLIENT_EMAIL, FB_PRIVATE_KEY, FB_DATABASE_URL, ADMIN_API_KEY');
+  console.error(
+    'Required: FB_PROJECT_ID, FB_CLIENT_EMAIL, FB_PRIVATE_KEY, FB_DATABASE_URL, ADMIN_API_KEY'
+  );
   process.exit(1);
 }
 
@@ -26,16 +34,14 @@ admin.initializeApp({
   credential: admin.credential.cert({
     projectId: FB_PROJECT_ID,
     clientEmail: FB_CLIENT_EMAIL,
-    privateKey
+    privateKey,
   }),
-  databaseURL: FB_DATABASE_URL
+  databaseURL: FB_DATABASE_URL,
 });
-
-const db = admin.database();
 
 // --- Express app ---
 const app = express();
-app.use(cors());          // allow calls from your dashboard pages
+app.use(cors()); // allow calls from your dashboard pages (GitHub Pages)
 app.use(express.json());
 
 // Simple health check
@@ -45,19 +51,17 @@ app.get('/', (req, res) => {
 
 // Middleware: require admin API key
 function requireAdminKey(req, res, next) {
-  // Accept either header name so both pages work
-  const key =
-    req.headers['x-admin-api-key'] ||
-    req.headers['x-admin-key'] ||
-    req.query.key;
-
+  const key = req.headers['x-admin-api-key'] || req.query.key;
   if (!key || key !== ADMIN_API_KEY) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   next();
 }
 
+// -------------------------------------------------------------------
+// DRIVERS LIST
 // GET /drivers  -> list all Firebase Auth users
+// -------------------------------------------------------------------
 app.get('/drivers', requireAdminKey, async (req, res) => {
   try {
     const users = [];
@@ -65,7 +69,7 @@ app.get('/drivers', requireAdminKey, async (req, res) => {
 
     do {
       const result = await admin.auth().listUsers(1000, nextPageToken);
-      result.users.forEach(u => {
+      result.users.forEach((u) => {
         users.push({
           uid: u.uid,
           email: u.email,
@@ -73,7 +77,7 @@ app.get('/drivers', requireAdminKey, async (req, res) => {
           phoneNumber: u.phoneNumber,
           disabled: u.disabled,
           creationTime: u.metadata.creationTime,
-          lastSignInTime: u.metadata.lastSignInTime
+          lastSignInTime: u.metadata.lastSignInTime,
         });
       });
       nextPageToken = result.pageToken;
@@ -86,7 +90,34 @@ app.get('/drivers', requireAdminKey, async (req, res) => {
   }
 });
 
+// -------------------------------------------------------------------
+// SINGLE DRIVER
+// GET /drivers/:uid -> details for one driver
+// -------------------------------------------------------------------
+app.get('/drivers/:uid', requireAdminKey, async (req, res) => {
+  try {
+    const u = await admin.auth().getUser(req.params.uid);
+    res.json({
+      user: {
+        uid: u.uid,
+        email: u.email,
+        displayName: u.displayName,
+        phoneNumber: u.phoneNumber,
+        disabled: u.disabled,
+        creationTime: u.metadata.creationTime,
+        lastSignInTime: u.metadata.lastSignInTime,
+      },
+    });
+  } catch (err) {
+    console.error('Error getting user:', err);
+    res.status(404).json({ error: 'User not found' });
+  }
+});
+
+// -------------------------------------------------------------------
+// DELETE DRIVER
 // DELETE /drivers/:uid  -> delete a driver
+// -------------------------------------------------------------------
 app.delete('/drivers/:uid', requireAdminKey, async (req, res) => {
   try {
     await admin.auth().deleteUser(req.params.uid);
@@ -97,102 +128,38 @@ app.delete('/drivers/:uid', requireAdminKey, async (req, res) => {
   }
 });
 
-// GET /driver-details?uid=... -> driver profile + loads + tickets + ratings
-app.get('/driver-details', requireAdminKey, async (req, res) => {
-  const uid = req.query.uid;
-
-  if (!uid) {
-    return res.status(400).json({ error: 'Missing uid query parameter' });
-  }
-
+// -------------------------------------------------------------------
+// DRIVER LOADS (placeholder for now)
+// GET /driver-loads/:uid -> list of loads for that driver
+// -------------------------------------------------------------------
+app.get('/driver-loads/:uid', requireAdminKey, async (req, res) => {
   try {
-    // 1) Basic auth user info
-    const userRecord = await admin.auth().getUser(uid);
+    const uid = req.params.uid;
+    const db = admin.database();
 
-    // 2) Pull all deliveries and filter by this driver
-    const deliveriesSnap = await db.ref('deliveries').once('value');
-    const deliveriesVal = deliveriesSnap.val() || {};
+    // For now, we just scan deliveries and check a couple of possible fields.
+    const snap = await db.ref('deliveries').once('value');
+    const all = snap.val() || {};
 
-    const loads = [];
-    Object.entries(deliveriesVal).forEach(([id, obj]) => {
-      const details = obj.details || {};
-      const status = obj.status || 'pending';
-
-      // Current / future matching options
-      const assignedEmail = (details.assignedDriverEmail || '').toLowerCase();
-      const assignedUid = details.assignedDriverUid || null;
-
-      if (
-        (userRecord.email && assignedEmail === userRecord.email.toLowerCase()) ||
-        assignedUid === uid
-      ) {
-        loads.push({
-          id,
-          status,
-          customerName: details.customerName || '',
-          address: details.address || '',
-          items: details.items || '',
-          yards: details.yards || 0,
-          revenue: details.revenue || 0,
-          profit: details.profit || 0,
-          createdAt: obj.createdAt || null
-        });
-      }
+    const loads = Object.entries(all).map(([id, d]) => {
+      const details = d.details || {};
+      return {
+        id,
+        status: d.status || 'unknown',
+        customerName: details.customerName || '',
+        address: details.address || '',
+        assignedDriver: details.assignedDriver || '',
+        assignedDriverUid: details.assignedDriverUid || '',
+        createdAt: d.createdAt || '',
+      };
     });
 
-    // 3) Future: scale ticket uploads (driver app will write here later)
-    const ticketsSnap = await db.ref('scaleTickets').child(uid).once('value');
-    const ticketsVal = ticketsSnap.val() || {};
-    const tickets = Object.entries(ticketsVal).map(([id, t]) => ({
-      id,
-      url: t.url || '',
-      fileName: t.fileName || '',
-      uploadedAt: t.uploadedAt || null,
-      loadId: t.loadId || null,
-    }));
-
-    // 4) Future: ratings / comments from customer tracker
-    const ratingsSnap = await db.ref('driverRatings').child(uid).once('value');
-    const ratingsVal = ratingsSnap.val() || {};
-    const ratings = Object.entries(ratingsVal).map(([id, r]) => ({
-      id,
-      rating: r.rating || null,            // 1–5 stars
-      comment: r.comment || '',
-      customerName: r.customerName || '',
-      loadId: r.loadId || null,
-      createdAt: r.createdAt || null,
-    }));
-
-    // Calculate simple stats
-    let avgRating = null;
-    if (ratings.length) {
-      const sum = ratings.reduce((acc, r) => acc + (Number(r.rating) || 0), 0);
-      avgRating = sum / ratings.length;
-    }
-
-    res.json({
-      user: {
-        uid: userRecord.uid,
-        email: userRecord.email || null,
-        displayName: userRecord.displayName || null,
-        phoneNumber: userRecord.phoneNumber || null,
-        disabled: userRecord.disabled || false,
-        creationTime: userRecord.metadata?.creationTime || null,
-        lastSignInTime: userRecord.metadata?.lastSignInTime || null,
-      },
-      loads,
-      tickets,
-      ratings,
-      stats: {
-        totalLoads: loads.length,
-        totalTickets: tickets.length,
-        totalRatings: ratings.length,
-        avgRating,
-      }
-    });
+    // In the future we’ll filter to just this driver’s loads (by uid or name).
+    // For now, we’ll send them all so the page has something to show.
+    res.json({ loads });
   } catch (err) {
-    console.error('Error in /driver-details:', err);
-    res.status(500).json({ error: 'Failed to load driver details', details: err.message });
+    console.error('Error loading driver loads:', err);
+    res.status(500).json({ error: 'Failed to load driver loads' });
   }
 });
 
